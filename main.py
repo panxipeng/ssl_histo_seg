@@ -19,32 +19,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from util import ramps
 
-# 计算混淆矩阵
-# def fast_hist(pred, label, n):
-#     #--------------------------------------------------------------------------------#
-#     #   a是转化成一维数组的标签，形状(H×W,)；b是转化成一维数组的预测结果，形状(H×W,)
-#     #--------------------------------------------------------------------------------#
-#     a = label
-#     b = pred
-#     k = (a >= 0) & (a < n)
-#     #--------------------------------------------------------------------------------#
-#     #   np.bincount计算了从0到n**2-1这n**2个数中每个数出现的次数，返回值形状(n, n)
-#     #   返回中，写对角线上的为分类正确的像素点
-#     #--------------------------------------------------------------------------------#
-#     return np.bincount(n * a[k].astype(int) + b[k], minlength=n ** 2).reshape(n, n)
 def fast_hist(a, b, n):
-    #--------------------------------------------------------------------------------#
-    #   a是转化成一维数组的标签，形状(H×W,)；b是转化成一维数组的预测结果，形状(H×W,)
-    #--------------------------------------------------------------------------------#
-    # a = label
-    # b = pred
-    k = (a >= 0) & (a < n)
-    #--------------------------------------------------------------------------------#
-    #   np.bincount计算了从0到n**2-1这n**2个数中每个数出现的次数，返回值形状(n, n)
-    #   返回中，写对角线上的为分类正确的像素点
-    #--------------------------------------------------------------------------------#
     return np.bincount(n * a[k].astype(int) + b[k], minlength=n ** 2).reshape(n, n)
-# 计算每个类别的平均iou
+
 def per_class_iu(hist):
     return np.diag(hist) / np.maximum((hist.sum(1) + hist.sum(0) - np.diag(hist)), 1)
 
@@ -57,7 +34,7 @@ def parse_args():
     # basic settings
     parser.add_argument('--data-root', type=str, default='data')
     parser.add_argument('--dataset', type=str, choices=['pascal', 'cityscapes'], default='pascal')
-    parser.add_argument('--batch-size', type=int, default=8)
+    parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=None)
     parser.add_argument('--epochs', type=int, default=None)
     parser.add_argument('--crop-size', type=int, default=None)
@@ -73,8 +50,8 @@ def parse_args():
     parser.add_argument('--save-path', type=str, default='outdir/models/pascal/1_2')
 
     # arguments for ST++
-    parser.add_argument('--reliable-id-path', type=str)
-    parser.add_argument('--plus', dest='plus', default=False, action='store_true',
+    parser.add_argument('--reliable-id-path', type=str, default='outdir/reliable_id_path')
+    parser.add_argument('--plus', dest='plus', default=True, action='store_true',
                         help='whether to use ST++')
 
     parser.add_argument('--consistency', type=float,
@@ -91,7 +68,7 @@ def main(args):
         os.makedirs(args.save_path)
     if not os.path.exists(args.pseudo_mask_path):
         os.makedirs(args.pseudo_mask_path)
-    if args.plus and args.reliable_id_path is None:
+    if not args.plus and args.reliable_id_path is None:
         exit('Please specify reliable-id-path in ST++.')
 
     criterion = CrossEntropyLoss(ignore_index=255)
@@ -106,23 +83,16 @@ def main(args):
 
     global MODE
     MODE = 'train'
-    # 因为要结合CPS，那么我们在第一阶段就使用到无标签数据，这个和原始ST++不一样，我们对无标签数据进行基本增强然后使用CPS训练
-    # 有标签数据
     labeled_trainset = SemiDataset(args.dataset, args.data_root, MODE, args.crop_size, args.labeled_id_path)
-    # 无标签数据
     unlabeled_trainset = SemiDataset(args.dataset, args.data_root, 'first_stage',args.crop_size, args.unlabeled_id_path)
     scale_nums = len(unlabeled_trainset.ids) // len(labeled_trainset.ids)
-    print("有标签数据大小 = ",len(labeled_trainset.ids))
-    # 有标签数据集扩大到无标签数据集的1/2
+    print("Number of labeled data = ",len(labeled_trainset.ids))
     scale_nums = scale_nums // 2
     print("scale_nums = ",scale_nums)
     # labeled_trainset.ids = 2 * labeled_trainset.ids if len(labeled_trainset.ids) < 200 else labeled_trainset.ids
     labeled_trainset.ids = scale_nums * labeled_trainset.ids if scale_nums > 1 else labeled_trainset.ids * 2
-    print("扩大后的有标签数据大小 = ",len(labeled_trainset.ids))
-    # 这个第0阶段的trainloader里面有有标签和无标签数据
-    # 有标签数据的dataloader
+    print("Augmented labeled data = ",len(labeled_trainset.ids))
     train_loader = DataLoader(labeled_trainset, batch_size=args.batch_size, shuffle=True,pin_memory=True, num_workers=4, drop_last=True)
-    # 无标签数据的dataloader
     unsupervised_train_loader = DataLoader(unlabeled_trainset, batch_size=args.batch_size, shuffle=True,pin_memory=True, num_workers=4, drop_last=True)
 
     model1, optimizer1 = init_basic_elems(args)
@@ -131,9 +101,6 @@ def main(args):
 
     print('\nParams: %.1fM' % count_params(model1))
     print('\nParams: %.1fM' % count_params(model2))
-    # ===========================第1阶段使用有标签和无标签数据进行CPS训练============================================
-    # 第一阶段使用有标签数据进行训练，无标签数据进行伪监督
-    # train1(model1=None, model2=None, train_loader=None, unsupervised_train_loader=None, valloader=None, criterion=None,optimizer1=None, optimizer2=None, args=None)
     best_model, checkpoints = train1(model1=model1,model2=model2, train_loader=train_loader,unsupervised_train_loader=unsupervised_train_loader, valloader=valloader, criterion=criterion, optimizer1=optimizer1, optimizer2=optimizer2,args=args)
     print("finish SupOnly......")
     """
@@ -168,7 +135,6 @@ def main(args):
         ST++ framework with selective re-training
     """
     # <===================================== Select Reliable IDs =====================================>
-    # =====================================第2阶段，计算前50%的可靠伪标签===============================
     print('\n\n\n================> Total stage 2/6: Select reliable images for the 1st stage re-training')
 
     dataset = SemiDataset(args.dataset, args.data_root, 'label', None, None, args.unlabeled_id_path)
@@ -177,7 +143,6 @@ def main(args):
     select_reliable(checkpoints, dataloader, args)
 
     # <================================ Pseudo label reliable images =================================>
-    # ======================================第3阶段，给前50%可靠无标签数据打上伪标签=====================
     print('\n\n\n================> Total stage 3/6: Pseudo labeling reliable images')
 
     cur_unlabeled_id_path = os.path.join(args.reliable_id_path, 'reliable_ids.txt')
@@ -187,20 +152,14 @@ def main(args):
     label(best_model, dataloader, args)
 
     # <================================== The 1st stage re-training ==================================>
-    # =====================================第4阶段，使用有标签，可靠伪标签重新训练，但是我们还要加上无标签数据=============
     print('\n\n\n================> Total stage 4/6: The 1st stage re-training on labeled and reliable unlabeled images')
 
     MODE = 'semi_train'
 
-    # 有标签数据+可靠伪标签数据  我们把这个当做有标签数据  我们再利用无标签数据进行CPS
     labeled_trainset = SemiDataset(args.dataset, args.data_root, MODE, args.crop_size,args.labeled_id_path, cur_unlabeled_id_path, args.pseudo_mask_path)
-    # 无标签数据
     cur_unlabeled_id_path = os.path.join(args.reliable_id_path, 'unreliable_ids.txt')
-    # 无标签数据，用的是不可靠标签
     unlabeled_trainset = SemiDataset(args.dataset, args.data_root, 'train', args.crop_size, cur_unlabeled_id_path)
-    # 有标签数据的dataloader
     train_loader = DataLoader(labeled_trainset, batch_size=args.batch_size, shuffle=True,pin_memory=True, num_workers=4, drop_last=True)
-    # 无标签数据的dataloader
     unsupervised_train_loader = DataLoader(unlabeled_trainset, batch_size=args.batch_size, shuffle=True,pin_memory=True,num_workers=4, drop_last=True)
 
     model1, optimizer1 = init_basic_elems(args)
@@ -215,7 +174,6 @@ def main(args):
                                      criterion=criterion, optimizer1=optimizer1, optimizer2=optimizer2, args=args)
 
     # <=============================== Pseudo label unreliable images ================================>
-    # ===========================第5阶段，使用训练好的模型，给剩下的50%不可靠无标签数据，打上伪标签=====
     print('\n\n\n================> Total stage 5/6: Pseudo labeling unreliable images')
 
     cur_unlabeled_id_path = os.path.join(args.reliable_id_path, 'unreliable_ids.txt')
@@ -225,7 +183,6 @@ def main(args):
     label(best_model, dataloader, args)
 
     # <================================== The 2nd stage re-training ==================================>
-    # ============================第6阶段，使用全部数据进行训练========================================
     print('\n\n\n================> Total stage 6/6: The 2nd stage re-training on labeled and all unlabeled images')
 
     trainset = SemiDataset(args.dataset, args.data_root, MODE, args.crop_size,
@@ -271,7 +228,6 @@ def get_current_consistency_weight(epoch):
 # train1(model1,model2, train_loader,unsupervised_train_loader, valloader, criterion, optimizer1, optimizer2,args)
 def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=None, valloader=None, criterion=None, optimizer1=None,optimizer2=None, args=None):
     iters = 0
-    # 需要迭代的总次数
     total_iters = len(train_loader) * args.epochs
 
     previous_best = 0.0
@@ -286,12 +242,8 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
     for epoch in range(args.epochs):
         print("\n==> Epoch %i, learning rate = %.4f\t\t\t\t\t previous best = %.2f" %
               (epoch, optimizer1.param_groups[0]["lr"], previous_best))
-        # print("\n==> Epoch %i, learning rate = %.4f\t\t\t\t\t previous best = %.2f" %
-        #       (epoch, optimizer2.param_groups[0]["lr"], previous_best))
-        # 训练模式
         model1.train()
         model2.train()
-        # 将model1和model2放入cuda中
         model1 = model1.to(device)
         model2 = model2.to(device)
 
@@ -299,13 +251,10 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         niters_per_epoch = min(len(train_loader),len(unsupervised_train_loader))
         tbar = tqdm(range(niters_per_epoch))
 
-        # 迭代器的有标签和无标签
         dataloader = iter(train_loader)
         unsupervised_dataloader = iter(unsupervised_train_loader)
         iter_num = iter_num + 1
-        # 混淆矩阵
         num_classes = 5
-        # 混淆矩阵
         hist2 = np.zeros((num_classes, num_classes))
         hist3 = np.zeros((num_classes, num_classes))
         for i in tbar:
@@ -336,12 +285,7 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
             # pred_r = torch.cat([pred_sup_r, pred_unsup_r], dim=0)
 
 
-            # 根据两个模型的不一致性得出不确定性的部分，进行加权
-            # 初步只对伪标签进行损失加权
             uncentainty_l = abs(torch.max(torch.softmax(pred_sup_l,dim=1), dim=1)[0] - torch.max(torch.softmax(pred_sup_r,dim=1), dim=1)[0])
-            # min_uncentainty = torch.min(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # max_uncentainty = torch.max(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # uncentainty_weights = (uncentainty - min_uncentainty) / (max_uncentainty - min_uncentainty)
             scale_uncentainty_l = torch.rand_like(uncentainty_l)
             for bix in range(uncentainty_l.shape[0]):
                 max_v = torch.max(uncentainty_l[bix])
@@ -354,10 +298,6 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
             scale_weights_l = scale_weights_l ** 4
 
             uncentainty_un = abs(torch.max(torch.softmax(pred_unsup_l,dim=1), dim=1)[0] - torch.max(torch.softmax(pred_unsup_r,dim=1), dim=1)[0])
-            # uncentainty_un = abs(torch.max(pred_unsup_l, dim=1)[0] - torch.max(pred_unsup_r, dim=1)[0])
-            # min_uncentainty = torch.min(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # max_uncentainty = torch.max(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # uncentainty_weights = (uncentainty - min_uncentainty) / (max_uncentainty - min_uncentainty)
             scale_uncentainty_un = torch.rand_like(uncentainty_un)
             for bix in range(uncentainty_un.shape[0]):
                 max_v = torch.max(uncentainty_un[bix])
@@ -368,7 +308,6 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
             scale_weights_un = 1 - uncentainty_un
             scale_weights_un = scale_weights_un ** 4
 
-            # 获得伪标签
             _, max_sup_l = torch.max(pred_sup_l, dim=1)
             _, max_unsup_l = torch.max(pred_unsup_l, dim=1)
             _, max_sup_r = torch.max(pred_sup_r, dim=1)
@@ -392,12 +331,9 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
 
             consistency_weight = get_current_consistency_weight(iter_num)
             
-            # 计算训练集的miou ,2个模型的
-            # 计算训练集的混淆矩阵
             hist2 += fast_hist(mask.cpu().numpy().flatten(),torch.max(pred_sup_l, dim=1)[1].cpu().numpy().flatten(), num_classes)
             hist3 += fast_hist(mask.cpu().numpy().flatten(),torch.max(pred_sup_r, dim=1)[1].cpu().numpy().flatten(), num_classes)
 
-            # 总的损失
             loss = loss_sup + loss_sup_r + consistency_weight * (cps_loss_l + cps_loss_un)
 
             optimizer1.zero_grad()
@@ -424,7 +360,7 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         mean_iou2 = np.mean(epoch_class_iou2)
         mean_iou3 = np.mean(epoch_class_iou3)
 
-        print("========================================训练集===================================================>")
+        print("========================================Training Set===================================================>")
         print("========================================model1===================================================>")
         print("tumor_iou : ", epoch_class_iou2[0], "stroma_iou : ",
               epoch_class_iou2[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou2[2],
@@ -456,9 +392,7 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
 
         tbar = tqdm(valloader)
 
-        # 混淆矩阵
         num_classes = 5
-        # 混淆矩阵
         hist4 = np.zeros((num_classes, num_classes))
         hist5 = np.zeros((num_classes, num_classes))
 
@@ -475,8 +409,6 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
                 pred2 = torch.cat([pred2, (100 * one * (mask.cuda() == 4).unsqueeze(dim=1))], dim=1)
                 pred2 = torch.argmax(pred2, dim=1)
 
-                # 计算训练集的miou ,2个模型的
-                # 计算训练集的混淆矩阵
                 # hist4 += fast_hist(pred.cpu().numpy().flatten(),
                 #                    mask.cpu().numpy().flatten(), num_classes)
                 # hist5 += fast_hist(pred2.cpu().numpy().flatten(),
@@ -492,7 +424,7 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         mean_iou2 = np.mean(epoch_class_iou2)
         mean_iou3 = np.mean(epoch_class_iou3)
 
-        print("========================================验证集===================================================>")
+        print("========================================Validation Set===================================================>")
         print("========================================model1===================================================>")
         print("tumor_iou : ", epoch_class_iou2[0], "stroma_iou : ",
               epoch_class_iou2[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou2[2],
@@ -549,7 +481,6 @@ def train1(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
     return best_model
 def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=None, valloader=None, criterion=None, optimizer1=None,optimizer2=None, args=None):
     iters = 0
-    # 需要迭代的总次数
     total_iters = len(train_loader) * args.epochs
 
     previous_best = 0.0
@@ -564,12 +495,8 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
     for epoch in range(args.epochs):
         print("\n==> Epoch %i, learning rate = %.4f\t\t\t\t\t previous best = %.2f" %
               (epoch, optimizer1.param_groups[0]["lr"], previous_best))
-        # print("\n==> Epoch %i, learning rate = %.4f\t\t\t\t\t previous best = %.2f" %
-        #       (epoch, optimizer2.param_groups[0]["lr"], previous_best))
-        # 训练模式
         model1.train()
         model2.train()
-        # 将model1和model2放入cuda中
         model1 = model1.to(device)
         model2 = model2.to(device)
 
@@ -578,14 +505,11 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         niters_per_epoch = min(len(train_loader),len(unsupervised_train_loader))
         tbar = tqdm(range(niters_per_epoch))
 
-        # 迭代器的有标签和无标签
         dataloader = iter(train_loader)
         unsupervised_dataloader = iter(unsupervised_train_loader)
         iter_num = iter_num + 1
 
-        # 混淆矩阵
         num_classes = 5
-        # 混淆矩阵
         hist2 = np.zeros((num_classes, num_classes))
         hist3 = np.zeros((num_classes, num_classes))
 
@@ -616,13 +540,8 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
             # pred_l = torch.cat([pred_sup_l, pred_unsup_l], dim=0)
             # pred_r = torch.cat([pred_sup_r, pred_unsup_r], dim=0)
 
-            # 根据两个模型的不一致性得出不确定性的部分，进行加权
-            # 初步只对伪标签进行损失加权
             uncentainty_l = abs(torch.max(torch.softmax(pred_sup_l, dim=1), dim=1)[0] -
                                 torch.max(torch.softmax(pred_sup_r, dim=1), dim=1)[0])
-            # min_uncentainty = torch.min(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # max_uncentainty = torch.max(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # uncentainty_weights = (uncentainty - min_uncentainty) / (max_uncentainty - min_uncentainty)
             scale_uncentainty_l = torch.rand_like(uncentainty_l)
             for bix in range(uncentainty_l.shape[0]):
                 max_v = torch.max(uncentainty_l[bix])
@@ -636,10 +555,6 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
 
             uncentainty_un = abs(torch.max(torch.softmax(pred_unsup_l, dim=1), dim=1)[0] -
                                  torch.max(torch.softmax(pred_unsup_r, dim=1), dim=1)[0])
-            # uncentainty_un = abs(torch.max(pred_unsup_l, dim=1)[0] - torch.max(pred_unsup_r, dim=1)[0])
-            # min_uncentainty = torch.min(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # max_uncentainty = torch.max(torch.min(uncentainty,dim=1)[0],dim=1)[0]
-            # uncentainty_weights = (uncentainty - min_uncentainty) / (max_uncentainty - min_uncentainty)
             scale_uncentainty_un = torch.rand_like(uncentainty_un)
             for bix in range(uncentainty_un.shape[0]):
                 max_v = torch.max(uncentainty_un[bix])
@@ -649,7 +564,6 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
             scale_weights_un = 1 - uncentainty_un
             scale_weights_un = scale_weights_un ** 4
 
-            # 获得伪标签
             _, max_sup_l = torch.max(pred_sup_l, dim=1)
             _, max_unsup_l = torch.max(pred_unsup_l, dim=1)
             _, max_sup_r = torch.max(pred_sup_r, dim=1)
@@ -679,14 +593,11 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
 
             consistency_weight = get_current_consistency_weight(iter_num)
 
-            # 计算训练集的miou ,2个模型的
-            # 计算训练集的混淆矩阵
             hist2 += fast_hist(mask.cpu().numpy().flatten(), torch.max(pred_sup_l, dim=1)[1].cpu().numpy().flatten(),
                                num_classes)
             hist3 += fast_hist(mask.cpu().numpy().flatten(), torch.max(pred_sup_r, dim=1)[1].cpu().numpy().flatten(),
                                num_classes)
 
-            # 总的损失
             loss = loss_sup + loss_sup_r + consistency_weight * (cps_loss_l + cps_loss_un)
             optimizer1.zero_grad()
             optimizer2.zero_grad()
@@ -712,7 +623,7 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         mean_iou2 = np.mean(epoch_class_iou2)
         mean_iou3 = np.mean(epoch_class_iou3)
 
-        print("========================================训练集===================================================>")
+        print("========================================Training Set===================================================>")
         print("========================================model1===================================================>")
         print("tumor_iou : ", epoch_class_iou2[0], "stroma_iou : ",
               epoch_class_iou2[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou2[2],
@@ -744,9 +655,7 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
 
         tbar = tqdm(valloader)
 
-        # 混淆矩阵
         num_classes = 5
-        # 混淆矩阵
         hist4 = np.zeros((num_classes, num_classes))
         hist5 = np.zeros((num_classes, num_classes))
 
@@ -763,8 +672,6 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
                 pred2 = torch.cat([pred2, (100 * one * (mask.cuda() == 4).unsqueeze(dim=1))], dim=1)
                 pred2 = torch.argmax(pred2, dim=1)
 
-                # 计算训练集的miou ,2个模型的
-                # 计算训练集的混淆矩阵
                 # hist4 += fast_hist(pred.cpu().numpy().flatten(),
                 #                    mask.cpu().numpy().flatten(), num_classes)
                 # hist5 += fast_hist(pred2.cpu().numpy().flatten(),
@@ -780,7 +687,7 @@ def train2(model1=None,model2=None, train_loader=None,unsupervised_train_loader=
         mean_iou2 = np.mean(epoch_class_iou2)
         mean_iou3 = np.mean(epoch_class_iou3)
 
-        print("========================================验证集===================================================>")
+        print("========================================Validation Set===================================================>")
         print("========================================model1===================================================>")
         print("tumor_iou : ", epoch_class_iou2[0], "stroma_iou : ",
               epoch_class_iou2[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou2[2],
@@ -854,7 +761,6 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
         tbar = tqdm(trainloader)
 
         iter_num = iter_num + 1
-        # 混淆矩阵
         num_classes = 5
         hist = np.zeros((num_classes, num_classes))
         for i, (img, mask) in enumerate(tbar):
@@ -862,7 +768,6 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
 
             pred = model(img)
 
-            # 计算训练集的混淆矩阵
             # hist += fast_hist(pred.cpu().numpy().flatten(), mask.cpu().numpy().flatten(), num_classes)
             hist += fast_hist(mask.cpu().numpy().flatten(),pred.cpu().numpy().flatten(), num_classes)
 
@@ -881,11 +786,10 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
 
             tbar.set_description('Loss: %.3f' % (total_loss / (i + 1)))
 
-        # 计算验证集的每个类别的iou和miou
         epoch_class_iou = per_class_iu(hist)
         mean_iou = np.mean(epoch_class_iou)
         # name_classes    = ["other","tumor","stroma","lymphocytic_infiltrate","necrosis_or_debris"]
-        print("========================================训练集===================================================>")
+        print("========================================Training Set===================================================>")
         print("tumor_iou : ", epoch_class_iou[0], "stroma_iou : ",
               epoch_class_iou[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou[2], "necrosis_or_debris_iou : ",
               epoch_class_iou[3], "other_iou : ", epoch_class_iou[4])
@@ -900,7 +804,6 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
 
         model.eval()
         tbar = tqdm(valloader)
-        # 验证集的混淆矩阵
         hist2 = np.zeros((num_classes, num_classes))
 
         with torch.no_grad():
@@ -909,7 +812,6 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
                 pred = model(img)
                 pred = torch.argmax(pred, dim=1)
 
-                # 计算验证集的混淆矩阵
                 # hist2 += fast_hist(pred.cpu().numpy().flatten(), mask.cpu().numpy().flatten(), num_classes)
                 hist2 += fast_hist(mask.cpu().numpy().flatten(),pred.cpu().numpy().flatten(), num_classes)
 
@@ -918,11 +820,10 @@ def train(model, trainloader, valloader, criterion, optimizer, args):
 
                 tbar.set_description('mIOU: %.2f' % (mIOU * 100.0))
 
-        # 计算验证集的每个类别的iou和miou
         epoch_class_iou2 = per_class_iu(hist2)
         mean_iou2 = np.mean(epoch_class_iou2)
         # name_classes    = ["other","tumor","stroma","lymphocytic_infiltrate","necrosis_or_debris"]
-        print("========================================训练集===================================================>")
+        print("========================================Training Set===================================================>")
         print("tumor_iou : ", epoch_class_iou2[0], "stroma_iou : ",
               epoch_class_iou2[1], "lymphocytic_infiltrate_iou : ", epoch_class_iou2[2], "necrosis_or_debris_iou : ",
               epoch_class_iou2[3], "other_iou : ", epoch_class_iou2[4])
@@ -1030,110 +931,3 @@ if __name__ == '__main__':
     print(args)
 
     main(args)
-
-
-# 1/16
-# --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data --batch-size 2 --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_16/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_16/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_16/split_0  --save-path outdir/models/pascal/1_16/split_0
-
-# python3 main.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data --batch-size 8 --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_16/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_16/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_16/split_0  --save-path outdir/models/pascal/1_16/split_0
-
-
-# 将最终的所有有标签数据，都进行全监督和伪监督
-# 0.4 cps
-# + cutmix
-
-
-# bcss
-# 有标签图像8404
-# 无标签图像 23422
-
-# 按照 8:1:1的随机划分 我们的训练集、验证集和测试集分别有  6724、840、840张图片
-
-# 1/2的有标签图像比例，那么有3362张有标签图像 和 3362+23422 = 26784张无标签图像
-# 1/4的有标签图像比例，那么有1681张有标签图像 和 5043+23422 = 28465张无标签图像
-# 1/8的有标签图像比例，那么有804张有标签图像 和 5920+23422 = 29342张无标签图像
-# 1/16的有标签图像比例，那么有420张有标签图像 和 6304+23422 = 29726张无标签图像
-# 1/100的有标签图像比例，那么有67张有标签图像 和 6657+23422 = 30079张无标签图像
-
-
-# bcss
-# 1.修改图片大小为256
-
-# 2.cps从0开始到0.4
-
-
-# 1/2
-# python3 main.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data --batch-size 8 --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_2/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_2/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_2/split_0  --save-path outdir/models/pascal/1_2/split_0
-# --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data --batch-size 8 --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_2/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_2/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_2/split_0  --save-path outdir/models/pascal/1_2/split_0
-
-
-
-
-##################记得要做的事情#########################
-# 回来改下有标签是无标签数据的 1/2
-
-
-
-
-# python3 main8.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data --batch-size 8 --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-
-
-# 这次实验室 0-0.1 cps 70epochs  70-80epochs 0.1cps 
-# 扩大有标签到无标签的1/2
-
-
-# python main9.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-
-# python main14.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-# python main17.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-# python main15.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-# python main19.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-# python main18.py --plus --reliable-id-path outdir/reliable_id_path  --dataset pascal --data-root data  --backbone resnet101 --model deeplabv3plus --labeled-id-path dataset/splits/pascal/1_1/split_0/labeled.txt --unlabeled-id-path dataset/splits/pascal/1_1/split_0/unlabeled.txt --pseudo-mask-path outdir/pseudo_masks/pascal/1_1/split_0  --save-path outdir/models/pascal/1_1/split_0
-
-# luad
-# 457 train	50valid	100test
-# 1/2unlabeled 8k+
-
-
-# 77.30
-# 重新给伪标签加权 + # train1 和 train2 选择最好的model
-
-
-# 77.70
-# train1 和 train2 选择最好的model + lr = 0.01
-
-
-
-# bcss
-# 重新给伪标签加权 + # train1 和 train2 选择最好的model + lr = 0.005 + 不确定性是4倍
-
-# bcss
-# 重新给伪标签加权 + # train1 和 train2 选择最好的model + lr = 0.005 + 不确定性是5倍 + 0.8 cutmix
-
-
-
-# bcss
-# 重新给伪标签加权 + # train1 和 train2 选择最好的model + lr = 0.005 + 不确定性是6倍 + 0.5 cutmix + 4classes
-
-# bcss
-# 4classes + lr = 0.01 + 0.4cps
-
-
-
-
-# 2022-10-16
-# 4classes + lr = 0.01 + 0.4cps + 重新划分训练集和验证集
-
-# 2022-10-27
-# 三次迭代
-
-
-# 2022-10-27
-# 默认保存3个checkpoints，我们保存5个
-
-# 2022-10-27 修改2
-# 多次迭代
-
-
-
-
