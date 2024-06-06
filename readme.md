@@ -1,4 +1,4 @@
-# UTCS: Uncertainty-guided Cross Teaching Semi-supervised Framework forHistopathology Tissue Segmentation with Curriculum Self-training (Under Review)
+# UTCS: Uncertainty-guided Cross Teaching Semi-supervised Framework for Histopathology Tissue Segmentation with Curriculum Self-training (Under Review)
 
 ## Environment
 To run this project, you need:
