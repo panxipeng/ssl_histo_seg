@@ -9,7 +9,7 @@ To run this project, you need:
 * Install all dependencies: `pip install -r requirements.txt`
 
 ## Data
-* BCSS and LUAD-HistoSeg datasets can found in [this link](https://github.com/ChuHan89/WSSS-Tissue).
+* BCSS and LUAD-HistoSeg datasets can be found in [this link](https://github.com/ChuHan89/WSSS-Tissue).
 * Data format:
    ```
   ssl_histo_seg/data/
